@@ -5,6 +5,7 @@ import static org.example.Tools.spinWait;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.cache.Cache;
 import javax.cache.event.EventType;
@@ -52,6 +53,9 @@ public class DemoListener {
 
       Map<String, Integer> versions = new ConcurrentHashMap<>();
 
+      AtomicInteger orphanedUpdates = new AtomicInteger();
+      AtomicInteger unorderedUpdates = new AtomicInteger();
+
       continuousQuery.setLocalListener(events -> events.forEach(event -> {
         String key = event.getKey();
         DataA value = event.getValue();
@@ -59,31 +63,56 @@ public class DemoListener {
         Integer previousVersion = versions.put(key, value.version);
         if (previousVersion == null
           && event.getEventType() != EventType.CREATED)
-          LOG.warn("{}: first event was {} with v{}", event.getEventType(), key,
+        {
+          orphanedUpdates.incrementAndGet();
+
+          LOG.warn("orphanedUpdate - {}: first event was {} with v{}", event.getEventType(), key,
             value.version);
+        }
 
-        if (previousVersion != null && previousVersion > value.version)
-          LOG.warn("{}: unordered {} with v{} -> v{}", event.getEventType(), key,
-            previousVersion, value.version);
+        if (previousVersion != null && previousVersion > value.version) {
+          unorderedUpdates.incrementAndGet();
 
-        //        LOG.info("Raw event: {} - {} - v{}", event.getEventType(), key,
-        //          value.version);
+          LOG.warn("unorderedUpdate - {}: unordered {} with v{} -> v{}", event.getEventType(),
+            key, previousVersion, value.version);
+        }
       }));
 
       QueryCursor<Cache.Entry<String, DataA>> cursor =
         cache.query(continuousQuery);
+
+      int initsOverUpdates = 0;
+      int newerInitsOverUpdates = 0;
 
       for (Cache.Entry<String, DataA> entry : cursor) {
         String key = entry.getKey();
         DataA value = entry.getValue();
 
         Integer previousVersion = versions.put(key, value.version);
-        if (previousVersion != null)
-          LOG.warn("{}: expected init with v{}, but there already was v{}", key,
-            value.version, previousVersion);
+        if (previousVersion != null) {
+          initsOverUpdates++;
+
+          if (value.version > previousVersion) {
+            LOG.warn(
+              "newerInitOverUpdate - {}: expected init with v{}, but there already was EARLIER v{}",
+              key, value.version, previousVersion);
+
+            newerInitsOverUpdates++;
+          } else {
+            LOG.warn("initOverUpdate - {}: expected init with v{}, but there already was v{}",
+              key, value.version, previousVersion);
+          }
+        }
 
         //        LOG.info("Raw event: INIT - {} - v{}", key, value.version);
       }
+
+      Thread.sleep(1_000);
+
+      LOG.info(
+        "orphanedUpdate's: {}, unorderedUpdate's: {}, initOverUpdate's: {}, newerInitOverUpdate's: {}",
+        orphanedUpdates.get(), unorderedUpdates.get(), initsOverUpdates,
+        newerInitsOverUpdates);
     } catch (Throwable err) {
       LOG.error("Error", err);
     }
